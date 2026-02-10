@@ -3,69 +3,122 @@ import xacro
 from ament_index_python.packages import get_package_share_directory
 
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription, DeclareLaunchArgument
+from launch.actions import IncludeLaunchDescription, DeclareLaunchArgument, GroupAction
 from launch.substitutions import LaunchConfiguration
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch_ros.actions import Node
+from launch_ros.actions import Node, PushRosNamespace
+
+
+def _make_robot_group(*, ns: str, entity_name: str,
+                      robot_description: str,
+                      gz_bridge_params_path: str,
+                      x, y, z, roll, pitch, yaw):
+    """
+    Create a namespaced robot:
+      - Spawns a unique Gazebo entity name
+      - Runs robot_state_publisher in a namespace with a TF frame prefix
+      - Runs a ros_gz_bridge parameter_bridge in the same namespace
+    """
+    return GroupAction([
+        PushRosNamespace(ns),
+
+        # Spawn in Gazebo (entity name MUST be unique)
+        Node(
+            package='ros_gz_sim',
+            executable='create',
+            arguments=[
+                '-name', entity_name,
+                '-string', robot_description,
+                '-x', x,
+                '-y', y,
+                '-z', z,
+                '-R', roll,
+                '-P', pitch,
+                '-Y', yaw,
+                '-allow_renaming', 'false'
+            ],
+            output='screen',
+        ),
+
+        # Publish TF/robot state; frame_prefix prevents TF collisions between robots
+        Node(
+            package='robot_state_publisher',
+            executable='robot_state_publisher',
+            parameters=[
+                {
+                    'robot_description': robot_description,
+                    'use_sim_time': True,
+                    # This prefixes every frame id, e.g. "base_link" -> "robot1/base_link"
+                    'frame_prefix': f'{ns}/',
+                }
+            ],
+            output='screen'
+        ),
+
+        # Bridge in the same namespace so topics become:
+        #   /robot1/cmd_vel, /robot1/odom, ...
+        #   /robot2/cmd_vel, /robot2/odom, ...
+        Node(
+            package='ros_gz_bridge',
+            executable='parameter_bridge',
+            arguments=[
+                '--ros-args', '-p',
+                f'config_file:={gz_bridge_params_path}'
+            ],
+            output='screen'
+        ),
+    ])
 
 
 def generate_launch_description():
-    # Define the robot's name and package name
-    robot_name = "differential_drive_robot"
     package_name = "gazebo_differential_drive_robot"
 
-    # Define a launch argument for the world file, defaulting to "empty.sdf"
+    # Gazebo world
     world_arg = DeclareLaunchArgument(
         'world',
         default_value='empty.sdf',
         description='Specify the world file for Gazebo (e.g., empty.sdf)'
     )
-
-    # Define launch arguments for initial pose
-    x_arg = DeclareLaunchArgument(
-        'x', default_value='0.0', description='Initial X position')
-
-    y_arg = DeclareLaunchArgument(
-        'y', default_value='0.0', description='Initial Y position')
-
-    z_arg = DeclareLaunchArgument(
-        'z', default_value='0.5', description='Initial Z position')
-
-    roll_arg = DeclareLaunchArgument(
-        'R', default_value='0.0', description='Initial Roll')
-
-    pitch_arg = DeclareLaunchArgument(
-        'P', default_value='0.0', description='Initial Pitch')
-
-    yaw_arg = DeclareLaunchArgument(
-        'Y', default_value='0.0', description='Initial Yaw')
-
-    # Retrieve launch configurations
     world_file = LaunchConfiguration('world')
-    x = LaunchConfiguration('x')
-    y = LaunchConfiguration('y')
-    z = LaunchConfiguration('z')
-    roll = LaunchConfiguration('R')
-    pitch = LaunchConfiguration('P')
-    yaw = LaunchConfiguration('Y')
 
-    # Set paths to Xacro model and configuration files
+    # Robot 1 pose args
+    x1_arg = DeclareLaunchArgument('x1', default_value='0.0', description='Robot1 initial X')
+    y1_arg = DeclareLaunchArgument('y1', default_value='0.0', description='Robot1 initial Y')
+    z1_arg = DeclareLaunchArgument('z1', default_value='0.5', description='Robot1 initial Z')
+    R1_arg = DeclareLaunchArgument('R1', default_value='0.0', description='Robot1 initial Roll')
+    P1_arg = DeclareLaunchArgument('P1', default_value='0.0', description='Robot1 initial Pitch')
+    Y1_arg = DeclareLaunchArgument('Y1', default_value='0.0', description='Robot1 initial Yaw')
+
+    # Robot 2 pose args (defaults offset so it doesn’t spawn on top of robot1)
+    x2_arg = DeclareLaunchArgument('x2', default_value='4.0', description='Robot2 initial X')
+    y2_arg = DeclareLaunchArgument('y2', default_value='0.0', description='Robot2 initial Y')
+    z2_arg = DeclareLaunchArgument('z2', default_value='0.5', description='Robot2 initial Z')
+    R2_arg = DeclareLaunchArgument('R2', default_value='0.0', description='Robot2 initial Roll')
+    P2_arg = DeclareLaunchArgument('P2', default_value='0.0', description='Robot2 initial Pitch')
+    Y2_arg = DeclareLaunchArgument('Y2', default_value='3.14', description='Robot2 initial Yaw')
+
+    x1 = LaunchConfiguration('x1'); y1 = LaunchConfiguration('y1'); z1 = LaunchConfiguration('z1')
+    R1 = LaunchConfiguration('R1'); P1 = LaunchConfiguration('P1'); Y1 = LaunchConfiguration('Y1')
+
+    x2 = LaunchConfiguration('x2'); y2 = LaunchConfiguration('y2'); z2 = LaunchConfiguration('z2')
+    R2 = LaunchConfiguration('R2'); P2 = LaunchConfiguration('P2'); Y2 = LaunchConfiguration('Y2')
+
+    # Paths
     robot_model_path = os.path.join(
         get_package_share_directory(package_name),
         'model',
         'robot.xacro'
     )
-
     gz_bridge_params_path = os.path.join(
         get_package_share_directory(package_name),
         'config',
         'gz_bridge.yaml'
     )
 
-    # Process the Xacro file to generate the URDF representation of the robot
+    # URDF from Xacro (same robot for both)
     robot_description = xacro.process_file(robot_model_path).toxml()
 
-    # Prepare to include the Gazebo simulation launch file
+    # Gazebo launch include
     gazebo_pkg_launch = PythonLaunchDescriptionSource(
         os.path.join(
             get_package_share_directory('ros_gz_sim'),
@@ -73,8 +126,6 @@ def generate_launch_description():
             'gz_sim.launch.py'
         )
     )
-
-    # Include the Gazebo launch description with specific arguments
     gazebo_launch = IncludeLaunchDescription(
         gazebo_pkg_launch,
         launch_arguments={
@@ -83,55 +134,30 @@ def generate_launch_description():
         }.items()
     )
 
-    # Create a node to spawn the robot model in the Gazebo environment
-    spawn_model_gazebo_node = Node(
-        package='ros_gz_sim',
-        executable='create',
-        arguments=[
-            '-name', robot_name,
-            '-string', robot_description,
-            '-x', x,
-            '-y', y,
-            '-z', z,
-            '-R', roll,
-            '-P', pitch,
-            '-Y', yaw,
-            '-allow_renaming', 'false'
-        ],
-        output='screen',
+    # Two robots, namespaced
+    robot1 = _make_robot_group(
+        ns='robot1',
+        entity_name='differential_drive_robot_1',
+        robot_description=robot_description,
+        gz_bridge_params_path=gz_bridge_params_path,
+        x=x1, y=y1, z=z1, roll=R1, pitch=P1, yaw=Y1
     )
 
-    # Create a node to publish the robot's state based on its URDF description
-    robot_state_publisher_node = Node(
-        package='robot_state_publisher',
-        executable='robot_state_publisher',
-        parameters=[
-            {'robot_description': robot_description, 'use_sim_time': True}
-        ],
-        output='screen'
-    )
-
-    # Create a node for the ROS-Gazebo bridge to handle message passing
-    gz_bridge_node = Node(
-        package='ros_gz_bridge',
-        executable='parameter_bridge',
-        arguments=[
-            '--ros-args', '-p',
-            f'config_file:={gz_bridge_params_path}'
-        ],
-        output='screen'
+    robot2 = _make_robot_group(
+        ns='robot2',
+        entity_name='differential_drive_robot_2',
+        robot_description=robot_description,
+        gz_bridge_params_path=gz_bridge_params_path,
+        x=x2, y=y2, z=z2, roll=R2, pitch=P2, yaw=Y2
     )
 
     return LaunchDescription([
         world_arg,
         gazebo_launch,
-        x_arg,
-        y_arg,
-        z_arg,
-        roll_arg,
-        pitch_arg,
-        yaw_arg,
-        spawn_model_gazebo_node,
-        robot_state_publisher_node,
-        gz_bridge_node,
+
+        x1_arg, y1_arg, z1_arg, R1_arg, P1_arg, Y1_arg,
+        x2_arg, y2_arg, z2_arg, R2_arg, P2_arg, Y2_arg,
+
+        robot1,
+        robot2,
     ])
